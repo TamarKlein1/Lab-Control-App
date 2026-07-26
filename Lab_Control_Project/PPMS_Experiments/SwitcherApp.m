@@ -22,7 +22,7 @@ classdef SwitcherApp < handle
             % 1. Connection Panel
             pConn = uipanel(mainLayout, 'Title', 'Hardware Connection');
             gConn = uigridlayout(pConn, [1, 3], 'ColumnWidth', {'1x', 100, 100});
-            app.AddrEdit = uieditfield(gConn, 'text', 'Value', 'SIM');
+            app.AddrEdit = uieditfield(gConn, 'text', 'Value', 'GPIB1::16::INSTR');
             
             app.ConnectBtn = uibutton(gConn, 'Text', 'Connect', 'ButtonPushedFcn', @(s,e) app.connectHardware());
             app.DisconnectBtn = uibutton(gConn, 'Text', 'Disconnect', 'ButtonPushedFcn', @(s,e) app.disconnectHardware(), 'Enable', 'off');

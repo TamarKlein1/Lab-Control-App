@@ -74,8 +74,8 @@ classdef PPMSFieldSweepApp < handle
             g = uigridlayout(p, [4, 2], 'ColumnWidth', {'1x', '1x'});
             
             uilabel(g, 'Text', 'PPMS DLL Path:'); app.AddrPPMS = uieditfield(g, 'text', 'Value', 'C:\MATLAB\Lab_Control_Project\Drivers\QDInstrument.dll');
-            uilabel(g, 'Text', 'M81 Address:');  app.AddrM81 = uieditfield(g, 'text', 'Value', 'SIM');
-            uilabel(g, 'Text', '3706 Switch:');   app.AddrSwitch = uieditfield(g, 'text', 'Value', 'SIM');
+            uilabel(g, 'Text', 'M81 Address:');  app.AddrM81 = uieditfield(g, 'text', 'Value', 'GPIB1::12::INSTR');
+            uilabel(g, 'Text', '3706 Switch:');   app.AddrSwitch = uieditfield(g, 'text', 'Value', 'GPIB1::16::INSTR');
             
             app.ConnectBtn = uibutton(g, 'Text', 'Connect', 'ButtonPushedFcn', @(s,e) app.connectHardware());
             app.DisconnectBtn = uibutton(g, 'Text', 'Disconnect', 'ButtonPushedFcn', @(s,e) app.disconnectHardware(), 'Enable', 'off');
