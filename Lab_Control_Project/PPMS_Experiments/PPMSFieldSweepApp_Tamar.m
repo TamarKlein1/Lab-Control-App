@@ -1,4 +1,4 @@
-classdef PPMSFieldSweepApp < handle
+classdef PPMSFieldSweepApp_Tamar < handle
     % PPMSFieldSweepApp - Multiplexed R vs. Magnetic Field Sweep
     
     properties
@@ -35,13 +35,14 @@ classdef PPMSFieldSweepApp < handle
     end
     
     methods
-        function app = PPMSFieldSweepApp()
+        function app = PPMSFieldSweepApp_Tamar()
             % Construct the GUI
             app.UIFigure = uifigure('Name', 'PPMS Magnetoresistance (Field Sweep)', 'Position', [100, 100, 1150, 850]);
             app.GridLayout = uigridlayout(app.UIFigure, [1, 2], 'ColumnWidth', {380, '1x'});
             
             % Left Panel: Controls
-            controlPanel = uipanel(app.GridLayout, 'Title', 'Experiment Setup');
+            controlPanel = uipanel(app.GridLayout, 'Title', 'Experiment Setup', 'Scrollable','on');
+            scrollContainer = uipanel(controlPanel, 'BorderType','none','Position',[0,0,360,1100]);
             controlLayout = uigridlayout(controlPanel, [7, 1], 'RowHeight', {'fit', 'fit', 'fit', '1x', 'fit', 'fit', 50});
             
             app.createConnectionPanel(controlLayout);
