@@ -198,6 +198,27 @@ classdef QDPPMS < handle
             end
         end
 
+        function shutdownTemperatureController(obj)
+            % Per the GPIB Commands Manual: SHUTDOWN "places the
+            % temperature controller code in standby mode; in which both
+            % drivers used to control the system temperature are turned
+            % off and the helium flow is set to a minimum value." This is
+            % a dedicated no-parameter command - NOT the same as calling
+            % setTemperature with an approach mode (TemperatureApproach
+            % only has FastSettle/NoOvershoot; there is no "Standby").
+            if obj.IsSimulated
+                fprintf('[SIM] Temperature controller placed in standby.\n');
+                return;
+            end
+
+            dummyReply = '';
+            dummyError = '';
+            [ret, ~, errOut] = obj.NetObj.SendPPMSCommand('SHUTDOWN', dummyReply, dummyError, 0, 2.0);
+            if ret ~= 0
+                warning('PPMS SHUTDOWN command failed: %s', char(errOut));
+            end
+        end
+
         %% --- STABILITY CHECK ---
         function reached = waitConditionReached(obj, waitTemp, waitField, waitPosition, waitChamber)
             % Non-blocking check of whether the requested subsystems are

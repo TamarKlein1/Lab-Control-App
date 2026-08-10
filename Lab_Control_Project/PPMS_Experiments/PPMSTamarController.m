@@ -641,7 +641,6 @@ classdef PPMSTamarController < handle
 
             app.logMessage(sprintf('%s: sweeping to %.1f Oe...', legLabel, targetField));
             app.PPMS.setMagneticField(targetField, rate, 'Linear', 'Driven');
-            pause(2);
 
             overrunCount = 0;
             worstOverrun = 0;
@@ -654,9 +653,12 @@ classdef PPMSTamarController < handle
                 for c = 1:numChannels
                     if ~app.IsRunning; break; end
 
+                    channelTimer = tic;
+
                     app.M81.setOutputState(false);
                     app.Switcher.closeChannels(def.ChannelSets{c});
                     pause(0.2);
+                    swapTime = toc(channelTimer);
 
                     app.M81.setOutputState(true);
                     settleTime = max(lockIn.TC * 5, 1.5);
@@ -669,8 +671,11 @@ classdef PPMSTamarController < handle
                     % shared per row.
                     [chanField, ~] = app.PPMS.getCurrentField();
 
+                    readTimer = tic;
                     rVal = NaN;
+                    attemptsUsed = 0;
                     for attempt = 1:4
+                        attemptsUsed = attempt;
                         try
                             rVal = app.M81.readResistance();
                             if isnan(rVal)
@@ -685,6 +690,11 @@ classdef PPMSTamarController < handle
                             pause(0.5);
                         end
                     end
+                    readTime = toc(readTimer);
+                    totalChannelTime = toc(channelTimer);
+
+                    app.logMessage(sprintf(['Ch %d timing: swap=%.2fs settle=%.2fs read=%.2fs ', ...
+                        '(attempts=%d) total=%.2fs'], c, swapTime, settleTime, readTime, attemptsUsed, totalChannelTime));
 
                     stepFields(c) = chanField;
                     stepValues(c) = rVal;
@@ -785,13 +795,9 @@ classdef PPMSTamarController < handle
                 end
                 app.logMessage('Magnetic field ramped to 0 Oe.');
 
-                % NOTE: QDPPMS does not currently expose a "Standby" approach
-                % mode for setTemperature - verify the exact driver call
-                % before relying on this in a real run.
                 try
-                    [currentTemp, ~] = app.PPMS.getCurrentTemperature();
-                    app.PPMS.setTemperature(currentTemp, 0.0, 'Standby');
-                    app.logMessage('Temperature set to standby.');
+                    app.PPMS.shutdownTemperatureController();
+                    app.logMessage('Temperature controller placed in standby.');
                 catch ME_Temp
                     app.logMessage(sprintf('Could not set temperature standby: %s', ME_Temp.message));
                 end
