@@ -589,6 +589,7 @@ classdef PPMSTamarController < handle
             % Ramp to start field and wait for it to stabilize.
             app.logMessage(sprintf('Ramping to start field (%.1f Oe)...', p.StartField));
             app.PPMS.setMagneticField(p.StartField, 100.0, 'Linear', 'Driven');
+            pause(10);
             while app.IsRunning
                 if app.PPMS.waitConditionReached(false, true, false, false)
                     break;
@@ -678,9 +679,12 @@ classdef PPMSTamarController < handle
                         attemptsUsed = attempt;
                         try
                             rVal = app.M81.readResistance();
+                            %[~, ~, rVal, ~] = app.M81.readLockIn();
                             if isnan(rVal)
-                                [~, ~, R_mag, ~] = app.M81.readLockIn();
-                                rVal = R_mag / lockIn.Current;
+                                %[~, ~, R_mag, ~] = app.M81.readLockIn();
+                                %rVal = R_mag / lockIn.Current;
+                                [V_real, ~, ~, ~] = app.M81.readLockIn();
+                                rVal = V_real / lockIn.Current;
                             end
                             if ~isnan(rVal) && abs(rVal) < 1e6
                                 break;

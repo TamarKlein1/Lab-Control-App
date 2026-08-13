@@ -367,7 +367,8 @@ classdef M81TimeSweepApp < handle
                         for attempt = 1:4
                             try
                                 [X_real, ~, ~, ~] = app.M81.readLockIn();
-                                rVal = X_real / app.CurrentEdit.Value;
+                                rVal = X_real ./ app.CurrentEdit.Value;
+                                rTamar = app.M81.readResistance()
                                 
                                 if ~isnan(rVal) && abs(rVal) < 1e6; break; end
                             catch

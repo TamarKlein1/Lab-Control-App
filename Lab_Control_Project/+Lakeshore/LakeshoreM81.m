@@ -168,17 +168,19 @@ classdef LakeshoreM81 < handle
             
             try
                 % Blazing fast single read using the cached excitation state
-                if strcmpi(obj.ActiveExcitation, 'AC')
-                    resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:REAL?', obj.MeasureChan)));
-                else
-                    resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:DC?', obj.MeasureChan)));
-                end
+                %if strcmpi(obj.ActiveExcitation, 'AC')
+                %    resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:INPHase?', obj.MeasureChan)));
+                %else
+                %    resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:DC?', obj.MeasureChan)));
+                %Measuring Magnitude as a diagnostic of phase misalignment
+                resValue = str2double(writeread(obj.VisaObj, sprintf('CALCulate:SENSe%d:RESistance:MAGNitude?', obj.MeasureChan)));
+                %end
             catch
                 resValue = NaN;
             end
             
             if isnan(resValue) || resValue >= 9.9e37
-                resValue = NaN;
+               resValue = NaN;
             end
         end
     end
