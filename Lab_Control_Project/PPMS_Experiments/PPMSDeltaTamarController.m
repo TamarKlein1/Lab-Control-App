@@ -467,6 +467,7 @@ classdef PPMSDeltaTamarController < handle
             p = def.Params;
             staticTemp = def.Static.Temperature;
             staticAngle = def.Static.Angle;
+            fromZero = isfield(p, 'FromZero') && p.FromZero;
 
             tempRate = 10.0;
             tempApproach = 'FastSettle';
@@ -499,6 +500,7 @@ classdef PPMSDeltaTamarController < handle
             fprintf(fileID, '%% Static Angle: %f deg\n', staticAngle);
             fprintf(fileID, '%% PPMS Sweep: %f Oe to %f Oe at %f Oe/sec\n', p.StartField, p.EndField, p.Rate);
             fprintf(fileID, '%% Repetitions: %d | Back-and-forth: %d\n', def.Repeat.Repetitions, def.Repeat.BackAndForth);
+            fprintf(fileID, '%% Start from zero: %d (Repetition 0 = 0 Oe to start field)\n', fromZero);
 
             headerParts = {'Time_s', 'Repetition'};
             for c = 1:numChannels
@@ -569,8 +571,16 @@ classdef PPMSDeltaTamarController < handle
             end
             app.logMessage(sprintf('Angle stabilized at %.2f deg.', staticAngle));
 
-            app.logMessage(sprintf('Ramping to start field (%.1f Oe)...', p.StartField));
-            app.PPMS.setMagneticField(p.StartField, 100.0, 'Linear', 'Driven');
+            % With "start from zero", the initial ramp goes to 0 Oe and the
+            % 0 -> StartField approach is measured as Repetition 0.
+            if fromZero
+                initialField = 0;
+            else
+                initialField = p.StartField;
+            end
+
+            app.logMessage(sprintf('Ramping to initial field (%.1f Oe)...', initialField));
+            app.PPMS.setMagneticField(initialField, 100.0, 'Linear', 'Driven');
             pause(10);
             while app.IsRunning
                 if app.PPMS.waitConditionReached(false, true, false, false)
@@ -582,12 +592,32 @@ classdef PPMSDeltaTamarController < handle
                 throw(MException('App:UserStop', 'Stopped by user.'));
             end
 
-            expStartTimer = tic;
             totalReps = def.Repeat.Repetitions;
             backForth = def.Repeat.BackAndForth;
             turnaroundSettleSec = 60;
 
+            app.logMessage(sprintf('Settling at initial field (%.1f Oe) for %d seconds...', initialField, turnaroundSettleSec));
+            pause(turnaroundSettleSec);
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+
+            expStartTimer = tic;
             segmentIndex = 0;
+
+            if fromZero
+                if p.StartField == 0
+                    app.logMessage('Start field is 0 Oe; skipping the from-zero leg.');
+                else
+                    app.runFieldSweepLeg(fileID, dataLines, def, p.StartField, p.Rate, p.Interval, ...
+                        'Rep 0 (from zero)', 0, expStartTimer);
+                    app.logMessage(sprintf('Settling at start field (%.1f Oe) for %d seconds before Rep 1/%d...', p.StartField, turnaroundSettleSec, totalReps));
+                    pause(turnaroundSettleSec);
+                    if ~app.IsRunning
+                        throw(MException('App:UserStop', 'Stopped by user.'));
+                    end
+                end
+            end
 
             for rep = 1:totalReps
                 if ~app.IsRunning; break; end
@@ -621,6 +651,7 @@ classdef PPMSDeltaTamarController < handle
 
             backForthNote = '';
             if backForth; backForthNote = ' back-and-forth'; end
+            if fromZero; backForthNote = [backForthNote, ', from zero']; end
 
             app.logMessage(sprintf('Field sweep "%s" complete (%d repetition(s)%s). Data saved to %s', ...
                 def.Name, totalReps, backForthNote, dataFile));

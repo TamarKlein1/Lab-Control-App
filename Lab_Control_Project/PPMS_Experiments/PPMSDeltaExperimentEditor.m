@@ -15,7 +15,7 @@ classdef PPMSDeltaExperimentEditor < handle
         AS_StartAngle, AS_EndAngle, AS_Speed, AS_Interval
 
         FieldSweepPanel
-        FS_StartField, FS_EndField, FS_Rate, FS_Interval
+        FS_StartField, FS_EndField, FS_Rate, FS_Interval, FS_FromZero
 
         CurrentSweepPanel
         CS_StartCurrent, CS_EndCurrent, CS_Steps, CS_Delay, CS_Compliance, CS_RestTime
@@ -113,11 +113,13 @@ classdef PPMSDeltaExperimentEditor < handle
             app.AnglePanel.Layout.Row = 1; app.AnglePanel.Layout.Column = 1;
 
             app.FieldSweepPanel = uipanel(containerLayout, 'Title', 'Field Sweep');
-            g = uigridlayout(app.FieldSweepPanel, [4, 2], 'ColumnWidth', {'1x', 100});
+            g = uigridlayout(app.FieldSweepPanel, [5, 2], 'ColumnWidth', {'1x', 100});
             uilabel(g, 'Text', 'Start Field (Oe):'); app.FS_StartField = uieditfield(g, 'numeric', 'Value', 0.0);
             uilabel(g, 'Text', 'End Field (Oe):');   app.FS_EndField = uieditfield(g, 'numeric', 'Value', 10000.0);
             uilabel(g, 'Text', 'Rate (Oe/sec):');    app.FS_Rate = uieditfield(g, 'numeric', 'Value', 50.0);
             uilabel(g, 'Text', 'Read Interval (s):'); app.FS_Interval = uieditfield(g, 'numeric', 'Value', 1.0);
+            app.FS_FromZero = uicheckbox(g, 'Text', 'Start measuring from 0 Oe (0 → Start Field as Repetition 0)', 'Value', false);
+            app.FS_FromZero.Layout.Column = [1 2];
             app.FieldSweepPanel.Layout.Row = 1; app.FieldSweepPanel.Layout.Column = 1;
 
             app.CurrentSweepPanel = uipanel(containerLayout, 'Title', 'Current Sweep (DC I-V)');
@@ -281,6 +283,7 @@ classdef PPMSDeltaExperimentEditor < handle
                 case 'FieldSweep'
                     app.FS_StartField.Value = p.StartField; app.FS_EndField.Value = p.EndField;
                     app.FS_Rate.Value = p.Rate; app.FS_Interval.Value = p.Interval;
+                    if isfield(p, 'FromZero'), app.FS_FromZero.Value = logical(p.FromZero); else, app.FS_FromZero.Value = false; end
                 case 'CurrentSweep'
                     app.CS_StartCurrent.Value = p.StartCurrent; app.CS_EndCurrent.Value = p.EndCurrent;
                     app.CS_Steps.Value = p.Steps; app.CS_Delay.Value = p.Delay;
@@ -332,7 +335,8 @@ classdef PPMSDeltaExperimentEditor < handle
                         'Speed', app.AS_Speed.Value, 'Interval', app.AS_Interval.Value);
                 case 'FieldSweep'
                     def.Params = struct('StartField', app.FS_StartField.Value, 'EndField', app.FS_EndField.Value, ...
-                        'Rate', app.FS_Rate.Value, 'Interval', app.FS_Interval.Value);
+                        'Rate', app.FS_Rate.Value, 'Interval', app.FS_Interval.Value, ...
+                        'FromZero', app.FS_FromZero.Value);
                 case 'CurrentSweep'
                     def.Params = struct(...
                         'StartCurrent', app.CS_StartCurrent.Value, ...
