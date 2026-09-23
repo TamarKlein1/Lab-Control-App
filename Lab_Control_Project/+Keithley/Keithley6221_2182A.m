@@ -19,6 +19,9 @@ classdef Keithley6221_2182A < handle
             try
                 obj.VisaObj = visadev(visaAddress);
                 
+                % INCREASE TIMEOUT to 100 seconds (prevents VISA read timeouts)
+                obj.VisaObj.Timeout = 100;
+
                 % Reset the 6221 Master
                 writeline(obj.VisaObj, '*RST');
                 
@@ -116,6 +119,9 @@ classdef Keithley6221_2182A < handle
                 deltaVolts = 1e-6 + randn()*1e-9;
                 return;
             end
+
+            % Flush old VISA buffer data
+            flush(obj.VisaObj);
             
             % Trigger the ALREADY ARMED measurement
             writeline(obj.VisaObj, 'INIT:IMM');
@@ -137,15 +143,43 @@ classdef Keithley6221_2182A < handle
         end
         %% --- 2182A SLAVE COMMANDS (Nanovoltmeter) ---
         
+        % function setVoltageRange(obj, range)
+        %     if strcmpi(range, 'AUTO')
+        %         obj.sendTo2182A('SENS:VOLT:DC:RANG:AUTO ON');
+        %     else
+        %         obj.sendTo2182A('SENS:VOLT:DC:RANG:AUTO OFF');
+        %         obj.sendTo2182A(sprintf('SENS:VOLT:DC:RANG %f', range));
+        %     end
+        % end
+
         function setVoltageRange(obj, range)
             if strcmpi(range, 'AUTO')
                 obj.sendTo2182A('SENS:VOLT:DC:RANG:AUTO ON');
             else
                 obj.sendTo2182A('SENS:VOLT:DC:RANG:AUTO OFF');
-                obj.sendTo2182A(sprintf('SENS:VOLT:DC:RANG %f', range));
+
+                % Parse string inputs from the GUI dropdown (e.g., '10mV', '1V')
+                if ischar(range) || isstring(range)
+                    rangeStr = char(range);
+                    multiplier = 1;
+                    if endsWith(rangeStr, 'mV', 'IgnoreCase', true)
+                        multiplier = 1e-3;
+                        numStr = strrep(upper(rangeStr), 'MV', '');
+                    elseif endsWith(rangeStr, 'V', 'IgnoreCase', true)
+                        multiplier = 1;
+                        numStr = strrep(upper(rangeStr), 'V', '');
+                    else
+                        numStr = rangeStr;
+                    end
+                    numericVal = str2double(numStr) * multiplier;
+                else
+                    numericVal = range; % Fallback if passed a raw number
+                end
+
+                obj.sendTo2182A(sprintf('SENS:VOLT:DC:RANG %f', numericVal));
             end
         end
-        
+
         function setNPLC(obj, nplc)
             obj.sendTo2182A(sprintf('SENS:VOLT:DC:NPLC %f', nplc));
         end
