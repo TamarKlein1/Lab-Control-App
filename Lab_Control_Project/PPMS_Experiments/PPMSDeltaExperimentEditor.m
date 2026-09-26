@@ -17,11 +17,8 @@ classdef PPMSDeltaExperimentEditor < handle
         FieldSweepPanel
         FS_StartField, FS_EndField, FS_Rate, FS_Interval, FS_FromZero
 
-        CurrentSweepPanel
-        CS_StartCurrent, CS_EndCurrent, CS_Steps, CS_Delay, CS_Compliance, CS_RestTime
-
         TempSweepPanel
-        TS_StartTemp, TS_EndTemp, TS_Rate, TS_Interval
+        TS_StartTemp, TS_EndTemp, TS_Rate, TS_Interval, TS_ApproachRate, TS_ApproachMode
 
         % Shared "held constant" environment panel
         StaticPanel
@@ -94,8 +91,8 @@ classdef PPMSDeltaExperimentEditor < handle
             g = uigridlayout(parent, [1, 2], 'ColumnWidth', {'fit', '1x'});
             uilabel(g, 'Text', 'Experiment Type:');
             app.TypeDrop = uidropdown(g, ...
-                'Items', {'Angle Sweep', 'Field Sweep', 'Current Sweep', 'Temperature Sweep'}, ...
-                'ItemsData', {'AngleSweep', 'FieldSweep', 'CurrentSweep', 'TemperatureSweep'}, ...
+                'Items', {'Angle Sweep', 'Field Sweep', 'Temperature Sweep'}, ...
+                'ItemsData', {'AngleSweep', 'FieldSweep', 'TemperatureSweep'}, ...
                 'Value', 'AngleSweep', 'ValueChangedFcn', @(s,e) app.onTypeChanged());
         end
 
@@ -122,22 +119,14 @@ classdef PPMSDeltaExperimentEditor < handle
             app.FS_FromZero.Layout.Column = [1 2];
             app.FieldSweepPanel.Layout.Row = 1; app.FieldSweepPanel.Layout.Column = 1;
 
-            app.CurrentSweepPanel = uipanel(containerLayout, 'Title', 'Current Sweep (DC I-V)');
-            g = uigridlayout(app.CurrentSweepPanel, [6, 2], 'ColumnWidth', {'1x', 100});
-            uilabel(g, 'Text', 'Start Current (A):'); app.CS_StartCurrent = uieditfield(g, 'numeric', 'Value', -10e-6);
-            uilabel(g, 'Text', 'End Current (A):');   app.CS_EndCurrent   = uieditfield(g, 'numeric', 'Value', 10e-6);
-            uilabel(g, 'Text', 'Steps:');             app.CS_Steps        = uieditfield(g, 'numeric', 'Value', 51);
-            uilabel(g, 'Text', 'Delay/Pt (s):');      app.CS_Delay        = uieditfield(g, 'numeric', 'Value', 0.2);
-            uilabel(g, 'Text', 'Compliance (V):');    app.CS_Compliance   = uieditfield(g, 'numeric', 'Value', 10.0);
-            uilabel(g, 'Text', 'Rest Time (s):');     app.CS_RestTime     = uieditfield(g, 'numeric', 'Value', 0.0);
-            app.CurrentSweepPanel.Layout.Row = 1; app.CurrentSweepPanel.Layout.Column = 1;
-
             app.TempSweepPanel = uipanel(containerLayout, 'Title', 'Temperature Sweep');
-            g = uigridlayout(app.TempSweepPanel, [4, 2], 'ColumnWidth', {'1x', 100});
+            g = uigridlayout(app.TempSweepPanel, [6, 2], 'ColumnWidth', {'1x', 100});
             uilabel(g, 'Text', 'Start Temp (K):'); app.TS_StartTemp = uieditfield(g, 'numeric', 'Value', 300.0);
             uilabel(g, 'Text', 'End Temp (K):');   app.TS_EndTemp = uieditfield(g, 'numeric', 'Value', 10.0);
             uilabel(g, 'Text', 'Rate (K/min):');   app.TS_Rate = uieditfield(g, 'numeric', 'Value', 2.0);
             uilabel(g, 'Text', 'Read Interval (s):'); app.TS_Interval = uieditfield(g, 'numeric', 'Value', 1.0);
+            uilabel(g, 'Text', 'Ramp to Start Rate (K/min):'); app.TS_ApproachRate = uieditfield(g, 'numeric', 'Value', 10.0, 'Limits', [0 Inf], 'LowerLimitInclusive', 'off');
+            uilabel(g, 'Text', 'Ramp to Start Approach:'); app.TS_ApproachMode = uidropdown(g, 'Items', {'FastSettle', 'NoOvershoot'}, 'Value', 'FastSettle');
             app.TempSweepPanel.Layout.Row = 1; app.TempSweepPanel.Layout.Column = 1;
         end
 
@@ -217,7 +206,6 @@ classdef PPMSDeltaExperimentEditor < handle
         function onTypeChanged(app)
             app.AnglePanel.Visible = 'off';
             app.FieldSweepPanel.Visible = 'off';
-            app.CurrentSweepPanel.Visible = 'off';
             app.TempSweepPanel.Visible = 'off';
 
             app.SE_FieldLabel.Visible = 'on'; app.SE_Field.Visible = 'on';
@@ -233,19 +221,11 @@ classdef PPMSDeltaExperimentEditor < handle
                 case 'FieldSweep'
                     app.FieldSweepPanel.Visible = 'on';
                     app.SE_FieldLabel.Visible = 'off'; app.SE_Field.Visible = 'off';
-                case 'CurrentSweep'
-                    app.CurrentSweepPanel.Visible = 'on';
                 case 'TemperatureSweep'
                     app.TempSweepPanel.Visible = 'on';
                     app.SE_TempLabel.Visible = 'off'; app.SE_Temp.Visible = 'off';
                     app.SE_TempRateLabel.Visible = 'off'; app.SE_TempRate.Visible = 'off';
                     app.SE_TempApproachLabel.Visible = 'off'; app.SE_TempApproach.Visible = 'off';
-            end
-
-            if strcmp(app.TypeDrop.Value, 'CurrentSweep')
-                app.DeltaPanel.Visible = 'off';
-            else
-                app.DeltaPanel.Visible = 'on';
             end
         end
 
@@ -284,14 +264,15 @@ classdef PPMSDeltaExperimentEditor < handle
                     app.FS_StartField.Value = p.StartField; app.FS_EndField.Value = p.EndField;
                     app.FS_Rate.Value = p.Rate; app.FS_Interval.Value = p.Interval;
                     if isfield(p, 'FromZero'), app.FS_FromZero.Value = logical(p.FromZero); else, app.FS_FromZero.Value = false; end
-                case 'CurrentSweep'
-                    app.CS_StartCurrent.Value = p.StartCurrent; app.CS_EndCurrent.Value = p.EndCurrent;
-                    app.CS_Steps.Value = p.Steps; app.CS_Delay.Value = p.Delay;
-                    if isfield(p, 'Compliance'), app.CS_Compliance.Value = p.Compliance; else, app.CS_Compliance.Value = 10.0; end
-                    if isfield(p, 'RestTime'),   app.CS_RestTime.Value   = p.RestTime;   else, app.CS_RestTime.Value   = 0.0;  end
                 case 'TemperatureSweep'
                     app.TS_StartTemp.Value = p.StartTemp; app.TS_EndTemp.Value = p.EndTemp;
                     app.TS_Rate.Value = p.Rate; app.TS_Interval.Value = p.Interval;
+                    if isfield(p, 'ApproachRate'), app.TS_ApproachRate.Value = p.ApproachRate; else, app.TS_ApproachRate.Value = 10.0; end
+                    if isfield(p, 'ApproachMode') && any(strcmp(p.ApproachMode, app.TS_ApproachMode.Items))
+                        app.TS_ApproachMode.Value = p.ApproachMode;
+                    else
+                        app.TS_ApproachMode.Value = 'FastSettle';
+                    end
             end
 
             if isfield(def, 'Static')
@@ -337,17 +318,10 @@ classdef PPMSDeltaExperimentEditor < handle
                     def.Params = struct('StartField', app.FS_StartField.Value, 'EndField', app.FS_EndField.Value, ...
                         'Rate', app.FS_Rate.Value, 'Interval', app.FS_Interval.Value, ...
                         'FromZero', app.FS_FromZero.Value);
-                case 'CurrentSweep'
-                    def.Params = struct(...
-                        'StartCurrent', app.CS_StartCurrent.Value, ...
-                        'EndCurrent',   app.CS_EndCurrent.Value, ...
-                        'Steps',        app.CS_Steps.Value, ...
-                        'Delay',        app.CS_Delay.Value, ...
-                        'Compliance',   app.CS_Compliance.Value, ...
-                        'RestTime',     app.CS_RestTime.Value);
                 case 'TemperatureSweep'
                     def.Params = struct('StartTemp', app.TS_StartTemp.Value, 'EndTemp', app.TS_EndTemp.Value, ...
-                        'Rate', app.TS_Rate.Value, 'Interval', app.TS_Interval.Value);
+                        'Rate', app.TS_Rate.Value, 'Interval', app.TS_Interval.Value, ...
+                        'ApproachRate', app.TS_ApproachRate.Value, 'ApproachMode', app.TS_ApproachMode.Value);
             end
 
             def.Static = struct('Field', app.SE_Field.Value, ...
@@ -359,14 +333,12 @@ classdef PPMSDeltaExperimentEditor < handle
             def.Repeat = struct('BackAndForth', app.BackForthCheckbox.Value, ...
                 'Repetitions', round(app.RepetitionsEdit.Value));
 
-            if ~strcmp(def.Type, 'CurrentSweep')
-                def.Delta = struct(...
-                    'PosI', app.Delta_PosI.Value, ...
-                    'NegI', app.Delta_NegI.Value, ...
-                    'Repeats', app.Delta_Repeats.Value, ...
-                    'Delay', app.Delta_Delay.Value, ...
-                    'Range', app.Delta_Range.Value);
-            end
+            def.Delta = struct(...
+                'PosI', app.Delta_PosI.Value, ...
+                'NegI', app.Delta_NegI.Value, ...
+                'Repeats', app.Delta_Repeats.Value, ...
+                'Delay', app.Delta_Delay.Value, ...
+                'Range', app.Delta_Range.Value);
         end
 
         function onSave(app)
