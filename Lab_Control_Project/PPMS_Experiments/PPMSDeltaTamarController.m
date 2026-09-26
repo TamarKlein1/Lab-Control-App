@@ -228,6 +228,10 @@ classdef PPMSDeltaTamarController < handle
             try
                 data = load(fullfile(path, file), 'experiment');
                 def = data.experiment;
+                if ~any(strcmp(def.Type, {'AngleSweep', 'RotatorSweep', 'FieldSweep', 'TemperatureSweep'}))
+                    uialert(app.UIFigure, sprintf('Experiment type "%s" is not supported by this controller.', def.Type), 'Load Error');
+                    return;
+                end
                 def.DefinitionFile = fullfile(path, file);
                 app.addExperimentToQueue(def);
             catch ME
@@ -401,8 +405,8 @@ classdef PPMSDeltaTamarController < handle
                             app.runFieldSweepExperiment(def);
                         case {'AngleSweep', 'RotatorSweep'}
                             app.runAngleSweepExperiment(def);
-                        case 'CurrentSweep'
-                            app.runCurrentSweepExperiment(def);
+                        case 'TemperatureSweep'
+                            app.runTemperatureSweepExperiment(def);
                         otherwise
                             app.logMessage(sprintf('Experiment type "%s" is not implemented yet - skipping.', def.Type));
                     end
@@ -457,11 +461,12 @@ classdef PPMSDeltaTamarController < handle
             app.LastClosedChannel = [];
 
             dataFile = app.resolveExperimentDataFile(def);
-            fileID = fopen(dataFile, 'w');
+            workFile = app.workingDataFile(dataFile);
+            fileID = fopen(workFile, 'w');
             if fileID < 0
-                error('Could not open data file: %s', dataFile);
+                error('Could not open data file: %s', workFile);
             end
-            fileCleanup = onCleanup(@() app.safeCloseFile(fileID)); %#ok<NASGU>
+            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
             hwCleanup = onCleanup(@() app.safeStopMeasurement()); %#ok<NASGU>
 
             p = def.Params;
@@ -653,8 +658,9 @@ classdef PPMSDeltaTamarController < handle
             if backForth; backForthNote = ' back-and-forth'; end
             if fromZero; backForthNote = [backForthNote, ', from zero']; end
 
-            app.logMessage(sprintf('Field sweep "%s" complete (%d repetition(s)%s). Data saved to %s', ...
-                def.Name, totalReps, backForthNote, dataFile));
+            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.logMessage(sprintf('Field sweep "%s" complete (%d repetition(s)%s).', ...
+                def.Name, totalReps, backForthNote));
         end
 
         function runFieldSweepLeg(app, fileID, dataLines, def, targetField, rate, interval, legLabel, repIndex, expStartTimer)
@@ -744,6 +750,298 @@ classdef PPMSDeltaTamarController < handle
             app.logMessage(sprintf('%s complete.', legLabel));
         end
 
+        %% --- Experiment Execution: Temperature Sweep ---
+        function runTemperatureSweepExperiment(app, def)
+            if isempty(app.PPMS) || isempty(app.DeltaMode) || isempty(app.Switcher)
+                error('Hardware is not connected.');
+            end
+
+            numChannels = length(def.ChannelSets);
+            if numChannels == 0
+                error('Experiment "%s" has no channel sets configured.', def.Name);
+            end
+
+            app.LastClosedChannel = [];
+
+            dataFile = app.resolveExperimentDataFile(def);
+            workFile = app.workingDataFile(dataFile);
+            fileID = fopen(workFile, 'w');
+            if fileID < 0
+                error('Could not open data file: %s', workFile);
+            end
+            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
+            hwCleanup = onCleanup(@() app.safeStopMeasurement()); %#ok<NASGU>
+
+            p = def.Params;
+            staticField = def.Static.Field;
+            staticAngle = def.Static.Angle;
+
+            % Approach to the start temperature (not measured). The sweep
+            % legs themselves use NoOvershoot at p.Rate, as in PPMSTempSweepApp.
+            approachRate = 10.0;
+            approachMode = 'FastSettle';
+            if isfield(p, 'ApproachRate') && ~isempty(p.ApproachRate) && p.ApproachRate > 0
+                approachRate = p.ApproachRate;
+            end
+            if isfield(p, 'ApproachMode') && ~isempty(p.ApproachMode)
+                approachMode = p.ApproachMode;
+            end
+            sweepMode = 'NoOvershoot';
+
+            if isfield(def, 'Delta')
+                posI    = def.Delta.PosI;
+                negI    = def.Delta.NegI;
+                repeats = def.Delta.Repeats;
+                delay   = def.Delta.Delay;
+                vRange  = def.Delta.Range;
+            else
+                posI    = 10e-6;
+                negI    = -10e-6;
+                repeats = 3;
+                delay   = 0.1;
+                vRange  = 'Auto';
+            end
+
+            totalReps = 1;
+            backForth = false;
+            if isfield(def, 'Repeat')
+                totalReps = def.Repeat.Repetitions;
+                backForth = def.Repeat.BackAndForth;
+            end
+
+            fprintf(fileID, '%% Experiment: %s\n', def.Name);
+            fprintf(fileID, '%% Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+            fprintf(fileID, '%% Delta Current (+I): %e A | (-I): %e A\n', posI, negI);
+            fprintf(fileID, '%% Delta Repeats: %d | Delay: %f s | Range: %s\n', repeats, delay, vRange);
+            fprintf(fileID, '%% Static Field: %f Oe | Static Angle: %f deg\n', staticField, staticAngle);
+            fprintf(fileID, '%% Ramp to Start: %f K/min (%s)\n', approachRate, approachMode);
+            fprintf(fileID, '%% PPMS Sweep: %f K to %f K at %f K/min (%s)\n', p.StartTemp, p.EndTemp, p.Rate, sweepMode);
+            fprintf(fileID, '%% Repetitions: %d | Back-and-forth: %d\n', totalReps, backForth);
+
+            headerParts = {'Time_s', 'Repetition'};
+            for c = 1:numChannels
+                vec = def.ChannelSets{c};
+                chanLabel = sprintf('%d_%d_%d_%d', vec(1), vec(2), vec(3), vec(4));
+                headerParts{end+1} = sprintf('Temperature_K_%s', chanLabel); %#ok<AGROW>
+                headerParts{end+1} = sprintf('V_Delta_%s', chanLabel); %#ok<AGROW>
+            end
+            fprintf(fileID, '%s\n', strjoin(headerParts, ','));
+
+            cla(app.PlotAxes);
+            title(app.PlotAxes, sprintf('%s - Delta Voltage vs. Temperature', def.Name));
+            xlabel(app.PlotAxes, 'Temperature (K)');
+            ylabel(app.PlotAxes, 'Delta Voltage (V)');
+            grid(app.PlotAxes, 'on');
+            dataLines = cell(1, numChannels);
+            colors = lines(numChannels);
+            for c = 1:numChannels
+                dataLines{c} = animatedline(app.PlotAxes, 'Color', colors(c,:), 'LineWidth', 1.5, 'Marker', '.');
+            end
+            legend(app.PlotAxes, def.ChannelItems, 'Location', 'best');
+
+            try
+                app.DeltaMode.disarmDeltaMode();
+                pause(0.2);
+            catch
+            end
+
+            if ismethod(app.DeltaMode, 'setVoltageRange')
+                app.DeltaMode.setVoltageRange(vRange);
+            end
+
+            app.DeltaMode.setupDeltaMode(posI, negI, repeats, 'oneshot', delay);
+            app.DeltaMode.armDeltaMode();
+
+            app.logMessage(sprintf('Setting static angle to %.2f deg...', staticAngle));
+            app.PPMS.setRotatorAngle(staticAngle, 5.0);
+            while app.IsRunning
+                [currentAngle, moveStatus, ~] = app.PPMS.getMovePosition();
+                stoppedByStatus = ~isnan(moveStatus) && moveStatus == 1;
+                stoppedByTolerance = ~isnan(currentAngle) && abs(currentAngle - staticAngle) < 1.0;
+                if stoppedByStatus || stoppedByTolerance
+                    break;
+                end
+                pause(1);
+            end
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+            app.logMessage(sprintf('Angle stabilized at %.2f deg.', staticAngle));
+
+            app.logMessage(sprintf('Setting static magnetic field to %.1f Oe...', staticField));
+            app.PPMS.setMagneticField(staticField, 100.0, 'Linear', 'Driven');
+            pause(5);
+            while app.IsRunning
+                if app.PPMS.waitConditionReached(false, true, false, false)
+                    break;
+                end
+                pause(1);
+            end
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+            app.logMessage(sprintf('Magnetic field stabilized at %.1f Oe.', staticField));
+
+            app.logMessage(sprintf('Ramping to start temperature (%.2f K, %.1f K/min, %s)...', p.StartTemp, approachRate, approachMode));
+            app.PPMS.setTemperature(p.StartTemp, approachRate, approachMode);
+            pause(5);
+            while app.IsRunning
+                if app.PPMS.waitConditionReached(true, false, false, false)
+                    break;
+                end
+                pause(1);
+            end
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+            app.logMessage(sprintf('Temperature stabilized at %.2f K.', p.StartTemp));
+
+            turnaroundSettleSec = 60;
+            app.logMessage(sprintf('Settling at start temperature (%.2f K) for %d seconds...', p.StartTemp, turnaroundSettleSec));
+            pause(turnaroundSettleSec);
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+
+            expStartTimer = tic;
+            segmentIndex = 0;
+
+            for rep = 1:totalReps
+                if ~app.IsRunning; break; end
+
+                if rep > 1
+                    app.logMessage(sprintf('Settling at start temperature (%.2f K) for %d seconds before Rep %d/%d...', p.StartTemp, turnaroundSettleSec, rep, totalReps));
+                    pause(turnaroundSettleSec);
+                    if ~app.IsRunning; break; end
+                end
+
+                segmentIndex = segmentIndex + 1;
+                legLabel = sprintf('Rep %d/%d (forward)', rep, totalReps);
+                app.runTemperatureSweepLeg(fileID, dataLines, def, p.EndTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
+
+                if backForth
+                    if ~app.IsRunning; break; end
+                    app.logMessage(sprintf('Settling at end temperature (%.2f K) for %d seconds...', p.EndTemp, turnaroundSettleSec));
+                    pause(turnaroundSettleSec);
+
+                    if ~app.IsRunning; break; end
+
+                    segmentIndex = segmentIndex + 1;
+                    legLabel = sprintf('Rep %d/%d (reverse)', rep, totalReps);
+                    app.runTemperatureSweepLeg(fileID, dataLines, def, p.StartTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
+                end
+            end
+
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+
+            backForthNote = '';
+            if backForth; backForthNote = ' back-and-forth'; end
+
+            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.logMessage(sprintf('Temperature sweep "%s" complete (%d repetition(s)%s).', ...
+                def.Name, totalReps, backForthNote));
+        end
+
+        function runTemperatureSweepLeg(app, fileID, dataLines, def, targetTemp, rate, approachMode, interval, legLabel, repIndex, expStartTimer)
+            numChannels = length(def.ChannelSets);
+
+            % A leg ends when the PPMS reports the temperature as reached and
+            % we are near the target, or we are within a tight tolerance of it.
+            % The distance check stops a stale "Stable" status right after
+            % setTemperature from ending the leg immediately.
+            nearTolK = 0.5;
+            tightTolK = 0.05;
+
+            app.logMessage(sprintf('%s: sweeping to %.2f K at %.2f K/min...', legLabel, targetTemp, rate));
+            app.PPMS.setTemperature(targetTemp, rate, approachMode);
+            pause(2);
+
+            overrunCount = 0;
+            worstOverrun = 0;
+
+            while app.IsRunning
+                loopTimer = tic;
+                stepTemps = NaN(1, numChannels);
+                stepValues = NaN(1, numChannels);
+
+                for c = 1:numChannels
+                    if ~app.IsRunning; break; end
+
+                    thisChannel = def.ChannelSets{c};
+
+                    app.Switcher.closeChannels(thisChannel);
+                    pause(0.2);
+                    app.LastClosedChannel = thisChannel;
+
+                    [chanTemp, ~] = app.PPMS.getCurrentTemperature();
+
+                    measV = NaN;
+                    for attempt = 1:4
+                        try
+                            measV = app.DeltaMode.runDeltaMeasurement();
+                            if isfinite(measV)
+                                break;
+                            end
+                        catch ME_Read
+                            if attempt == 4; rethrow(ME_Read); end
+                            pause(0.2);
+                        end
+                    end
+
+                    stepTemps(c) = chanTemp;
+                    stepValues(c) = measV;
+                    if isfinite(measV)
+                        addpoints(dataLines{c}, chanTemp, measV);
+                    end
+                    drawnow limitrate;
+                end
+
+                if app.IsRunning
+                    elapsedSeconds = toc(expStartTimer);
+                    rowParts = cell(1, 2 + numChannels * 2);
+                    rowParts{1} = sprintf('%.2f', elapsedSeconds);
+                    rowParts{2} = sprintf('%d', repIndex);
+
+                    for c = 1:numChannels
+                        rowParts{2 + 2*c - 1} = sprintf('%f', stepTemps(c));
+                        rowParts{2 + 2*c}     = sprintf('%e', stepValues(c));
+                    end
+                    fprintf(fileID, '%s\n', strjoin(rowParts, ','));
+                end
+
+                [currentTemp, ~] = app.PPMS.getCurrentTemperature();
+                distance = abs(currentTemp - targetTemp);
+                if distance < tightTolK || ...
+                        (distance < nearTolK && app.PPMS.waitConditionReached(true, false, false, false))
+                    break;
+                end
+
+                timeTaken = toc(loopTimer);
+                remainingWait = interval - timeTaken;
+                if remainingWait > 0
+                    pause(remainingWait);
+                else
+                    overrunCount = overrunCount + 1;
+                    worstOverrun = max(worstOverrun, -remainingWait);
+                    drawnow;
+                end
+            end
+
+            if ~app.IsRunning
+                throw(MException('App:UserStop', 'Stopped by user.'));
+            end
+
+            if overrunCount > 0
+                app.logMessage(sprintf(['%s: %d interval(s) ran over the %.1fs budget ', ...
+                    '(worst overrun: %.1fs). Measurement is taking longer than the configured interval.'], ...
+                    legLabel, overrunCount, interval, worstOverrun));
+            end
+
+            app.logMessage(sprintf('%s complete.', legLabel));
+        end
+
         %% --- Experiment Execution: Angle Sweep ---
         function runAngleSweepExperiment(app, def)
             if isempty(app.PPMS) || isempty(app.DeltaMode) || isempty(app.Switcher)
@@ -758,11 +1056,12 @@ classdef PPMSDeltaTamarController < handle
             app.LastClosedChannel = [];
         
             dataFile = app.resolveExperimentDataFile(def);
-            fileID = fopen(dataFile, 'w');
+            workFile = app.workingDataFile(dataFile);
+            fileID = fopen(workFile, 'w');
             if fileID < 0
-                error('Could not open data file: %s', dataFile);
+                error('Could not open data file: %s', workFile);
             end
-            fileCleanup = onCleanup(@() app.safeCloseFile(fileID));
+            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
             hwCleanup = onCleanup(@() app.safeStopMeasurement());
         
             p = def.Params;
@@ -978,220 +1277,8 @@ classdef PPMSDeltaTamarController < handle
                 throw(MException('App:UserStop', 'Stopped by user.'));
             end
         
-            app.logMessage(sprintf('Angle sweep "%s" complete. Data saved to %s', def.Name, dataFile));
-        end
-
-        %% --- Experiment Execution: Current Sweep (DC I-V) ---
-        function runCurrentSweepExperiment(app, def)
-            if isempty(app.PPMS) || isempty(app.DeltaMode) || isempty(app.Switcher)
-                error('Hardware is not connected.');
-            end
-
-            numChannels = length(def.ChannelSets);
-            if numChannels == 0
-                error('Experiment "%s" has no channel sets configured.', def.Name);
-            end
-
-            app.LastClosedChannel = [];
-
-            dataFile = app.resolveExperimentDataFile(def);
-            fileID = fopen(dataFile, 'w');
-            if fileID < 0
-                error('Could not open data file: %s', dataFile);
-            end
-
-            fileCleanup = onCleanup(@() app.safeCloseFile(fileID));
-            hwCleanup   = onCleanup(@() app.safeStopCurrentSweep());
-
-            p = def.Params;
-            staticTemp  = def.Static.Temperature;
-            staticField = def.Static.Field;
-            staticAngle = def.Static.Angle;
-
-            tempRate = 10.0;
-            tempApproach = 'FastSettle';
-            if isfield(def.Static, 'TempRate') && ~isempty(def.Static.TempRate)
-                tempRate = def.Static.TempRate;
-            end
-            if isfield(def.Static, 'TempApproach') && ~isempty(def.Static.TempApproach)
-                tempApproach = def.Static.TempApproach;
-            end
-
-            complianceVolts = 10.0;
-            if isfield(p, 'Compliance') && ~isempty(p.Compliance)
-                complianceVolts = p.Compliance;
-            end
-
-            fprintf(fileID, '%% Experiment: %s\n', def.Name);
-            fprintf(fileID, '%% Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
-            fprintf(fileID, '%% Sweep Current: %e A to %e A (%d steps, delay: %f s, compliance: %f V)\n', ...
-                p.StartCurrent, p.EndCurrent, p.Steps, p.Delay, complianceVolts);
-            fprintf(fileID, '%% Static Temperature: %f K (Rate: %f K/min, Approach: %s)\n', staticTemp, tempRate, tempApproach);
-            fprintf(fileID, '%% Static Magnetic Field: %f Oe\n', staticField);
-            fprintf(fileID, '%% Static Angle: %f deg\n', staticAngle);
-            fprintf(fileID, '%% Repetitions: %d | Back-and-forth: %d\n', def.Repeat.Repetitions, def.Repeat.BackAndForth);
-
-            % Header setup matching parallel channel columns
-            headerParts = {'Time_s', 'Repetition', 'I_Applied_A'};
-            for c = 1:numChannels
-                vec = def.ChannelSets{c};
-                chanLabel = sprintf('%d_%d_%d_%d', vec(1), vec(2), vec(3), vec(4));
-                headerParts{end+1} = sprintf('V_Meas_%s', chanLabel); %#ok<AGROW>
-            end
-            fprintf(fileID, '%s\n', strjoin(headerParts, ','));
-
-            cla(app.PlotAxes);
-            title(app.PlotAxes, sprintf('%s - I-V Curve (T=%.1fK, H=%.1fOe, \\theta=%.1f\\circ)', ...
-                def.Name, staticTemp, staticField, staticAngle));
-            xlabel(app.PlotAxes, 'Applied Current (A)');
-            ylabel(app.PlotAxes, 'Measured Voltage (V)');
-            grid(app.PlotAxes, 'on');
-            dataLines = cell(1, numChannels);
-            colors = lines(numChannels);
-            for c = 1:numChannels
-                dataLines{c} = animatedline(app.PlotAxes, 'Color', colors(c,:), 'LineWidth', 1.5, 'Marker', '.');
-            end
-            if isfield(def, 'ChannelItems') && ~isempty(def.ChannelItems)
-                legend(app.PlotAxes, def.ChannelItems, 'Location', 'best');
-            end
-
-            app.logMessage(sprintf('Setting temperature to %.2f K...', staticTemp));
-            app.PPMS.setTemperature(staticTemp, tempRate, tempApproach);
-            while app.IsRunning
-                if app.PPMS.waitConditionReached(true, false, false, false); break; end
-                pause(1);
-            end
-            if ~app.IsRunning; throw(MException('App:UserStop', 'Stopped by user.')); end
-
-            app.logMessage(sprintf('Setting magnetic field to %.1f Oe...', staticField));
-            app.PPMS.setMagneticField(staticField, 100.0, 'Linear', 'Driven');
-            pause(2);
-            while app.IsRunning
-                if app.PPMS.waitConditionReached(false, true, false, false); break; end
-                pause(1);
-            end
-            if ~app.IsRunning; throw(MException('App:UserStop', 'Stopped by user.')); end
-
-            app.logMessage(sprintf('Setting rotator angle to %.2f deg...', staticAngle));
-            app.PPMS.setRotatorAngle(staticAngle, 5.0);
-            while app.IsRunning
-                [currentAngle, moveStatus, ~] = app.PPMS.getMovePosition();
-                if (~isnan(moveStatus) && moveStatus == 1) || (~isnan(currentAngle) && abs(currentAngle - staticAngle) < 0.5)
-                    break;
-                end
-                pause(1);
-            end
-            if ~app.IsRunning; throw(MException('App:UserStop', 'Stopped by user.')); end
-            app.logMessage('Environment set (Temperature, Field, Angle stabilized).');
-
-            %% --- Prep Keithley 6221 for DC Current Sweep ---
-            try
-                % Disarm Delta Mode if previously active from Field/Angle sweeps
-                app.DeltaMode.disarmDeltaMode();
-                pause(0.2);
-            catch
-            end
-
-            % Clear GPIB error queue (*CLS) and set compliance
-            if ismethod(app.DeltaMode, 'clearErrorQueue')
-                app.DeltaMode.clearErrorQueue();
-            end
-            app.DeltaMode.setCompliance(complianceVolts);
-
-            currentArray = linspace(p.StartCurrent, p.EndCurrent, p.Steps);
-            totalReps = def.Repeat.Repetitions;
-            backForth = def.Repeat.BackAndForth;
-            expStartTimer = tic;
-
-            for rep = 1:totalReps
-                if ~app.IsRunning; break; end
-
-                app.runSingleCurrentSweepPass(fileID, dataLines, def, currentArray, rep, expStartTimer);
-
-                if backForth && app.IsRunning
-                    app.runSingleCurrentSweepPass(fileID, dataLines, def, fliplr(currentArray), rep, expStartTimer);
-                end
-            end
-
-            app.safeZeroAndDisableCurrent();
-
-            if ~app.IsRunning
-                throw(MException('App:UserStop', 'Stopped by user.'));
-            end
-
-            app.logMessage(sprintf('Current sweep "%s" complete. Data saved to %s', def.Name, dataFile));
-        end
-
-        function runSingleCurrentSweepPass(app, fileID, dataLines, def, currentArray, repIdx, expStartTimer)
-            numChannels = length(def.ChannelSets);
-            p = def.Params;
-
-            restTime = 0;
-            if isfield(p, 'RestTime') && ~isempty(p.RestTime)
-                restTime = p.RestTime;
-            end
-
-            app.DeltaMode.setOutput('ON');
-            passCleanup = onCleanup(@() app.safeZeroAndDisableCurrent()); %#ok<NASGU>
-
-            % Step current array on outer loop for parallel channel measurement
-            for i = 1:length(currentArray)
-                if ~app.IsRunning; break; end
-
-                iApply = currentArray(i);
-
-                % Set applied current and wait stabilization delay
-                app.DeltaMode.setCurrent(iApply);
-                pause(p.Delay);
-
-                stepValues = NaN(1, numChannels);
-
-                % Cycle through channel sets in parallel for current step i
-                for c = 1:numChannels
-                    if ~app.IsRunning; break; end
-
-                    thisChannel = def.ChannelSets{c};
-                    app.Switcher.closeChannels(thisChannel);
-                    pause(0.1); % Debounce / settling delay for switch relay
-                    app.LastClosedChannel = thisChannel;
-
-                    measV = app.DeltaMode.getReading();
-                    stepValues(c) = measV;
-
-                    if isfinite(measV)
-                        addpoints(dataLines{c}, iApply, measV);
-                    end
-                    drawnow limitrate;
-                end
-
-                if restTime > 0
-                    app.DeltaMode.setCurrent(0);
-                    pause(restTime);
-                end
-
-                % Write a single row formatted identically across all channels
-                if app.IsRunning
-                    elapsedSeconds = toc(expStartTimer);
-                    rowParts = cell(1, 3 + numChannels);
-                    rowParts{1} = sprintf('%.2f', elapsedSeconds);
-                    rowParts{2} = sprintf('%d', repIdx);
-                    rowParts{3} = sprintf('%e', iApply);
-
-                    for c = 1:numChannels
-                        rowParts{c + 3} = sprintf('%e', stepValues(c));
-                    end
-                    fprintf(fileID, '%s\n', strjoin(rowParts, ','));
-                end
-            end
-        end
-
-        function safeZeroAndDisableCurrent(app)
-            try
-                if ~isempty(app.DeltaMode)
-                    app.DeltaMode.setCurrent(0.0);
-                    app.DeltaMode.setOutput('OFF');
-                end
-            catch; end
+            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.logMessage(sprintf('Angle sweep "%s" complete.', def.Name));
         end
 
         function safeCloseFile(~, fileID)
@@ -1203,20 +1290,81 @@ classdef PPMSDeltaTamarController < handle
             try app.Switcher.openAllChannels(); catch; end
         end
 
-        function safeStopCurrentSweep(app)
-            app.safeZeroAndDisableCurrent();
-            try
-                if ~isempty(app.Switcher)
-                    app.Switcher.openAllChannels();
-                end
-            catch; end
+        % Data is written to "<name>_INPROGRESS.csv" while an experiment runs.
+        % Only once that file is closed is it renamed to "<name>.csv" and a
+        % "<name>.mat" copy written, so the final files can never be opened
+        % (or saved over by Excel / a sync client) while still being written.
+        function workFile = workingDataFile(~, dataFile)
+            [filepath, name, ext] = fileparts(dataFile);
+            workFile = fullfile(filepath, [name '_INPROGRESS' ext]);
         end
 
-        function safeFile = resolveUniqueDataFilename(~, baseFile)
+        function finalizeDataFile(app, fileID, workFile, dataFile, def)
+            % Called explicitly on success and again from onCleanup (stop or
+            % error). The first call closes the file; later calls do nothing.
+            if isempty(fopen(fileID))
+                return;
+            end
+            app.safeCloseFile(fileID);
+
+            try
+                [ok, msg] = movefile(workFile, dataFile);
+                if ~ok
+                    % e.g. the in-progress file is open in Excel: publish a copy
+                    % and leave the in-progress file behind.
+                    [ok, msg2] = copyfile(workFile, dataFile);
+                    if ok
+                        app.logMessage(sprintf('Could not rename %s (%s); saved a copy instead.', workFile, msg));
+                    else
+                        app.logMessage(sprintf('Could not publish data file (%s). Data is in %s', msg2, workFile));
+                        return;
+                    end
+                end
+                app.logMessage(sprintf('Data saved to %s', dataFile));
+            catch ME
+                app.logMessage(sprintf('Could not publish data file (%s). Data is in %s', ME.message, workFile));
+                return;
+            end
+
+            [filepath, name] = fileparts(dataFile);
+            matFile = fullfile(filepath, [name '.mat']);
+            try
+                app.saveDataAsMat(dataFile, matFile, def);
+                app.logMessage(sprintf('MAT copy saved to %s', matFile));
+            catch ME
+                app.logMessage(sprintf('Could not write MAT copy (%s). The CSV is unaffected.', ME.message));
+            end
+        end
+
+        function saveDataAsMat(~, csvFile, matFile, def)
+            % metadata: the "%" header lines; columns: column names;
+            % data: numeric matrix (NaN where a value could not be parsed).
+            lines = splitlines(strtrim(fileread(csvFile)));
+            isMeta = startsWith(lines, '%');
+            metadata = lines(isMeta); %#ok<NASGU>
+            rest = lines(~isMeta);
+            rest = rest(~cellfun(@isempty, rest));
+
+            columns = {};
+            data = zeros(0, 0);
+            if ~isempty(rest)
+                columns = strsplit(rest{1}, ',');
+                data = NaN(numel(rest) - 1, numel(columns));
+                for i = 2:numel(rest)
+                    vals = str2double(strsplit(rest{i}, ','));
+                    n = min(numel(vals), numel(columns));
+                    data(i - 1, 1:n) = vals(1:n);
+                end
+            end
+            experiment = def; %#ok<NASGU>
+            save(matFile, 'data', 'columns', 'metadata', 'experiment');
+        end
+
+        function safeFile = resolveUniqueDataFilename(app, baseFile)
             [filepath, name, ext] = fileparts(baseFile);
             safeFile = baseFile;
             counter = 1;
-            while isfile(safeFile)
+            while isfile(safeFile) || isfile(app.workingDataFile(safeFile))
                 safeFile = fullfile(filepath, sprintf('%s_%d%s', name, counter, ext));
                 counter = counter + 1;
             end
