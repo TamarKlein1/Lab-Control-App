@@ -460,13 +460,9 @@ classdef PPMSDeltaTamarController < handle
 
             app.LastClosedChannel = [];
 
-            dataFile = app.resolveExperimentDataFile(def);
-            workFile = app.workingDataFile(dataFile);
-            fileID = fopen(workFile, 'w');
-            if fileID < 0
-                error('Could not open data file: %s', workFile);
-            end
-            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
+            outputFolder = strtrim(app.OutputFolderEdit.Value);
+            rec = app.startDataRecording(def, outputFolder);
+            dataCleanup = onCleanup(@() app.finishDataRecording(rec, def, outputFolder)); %#ok<NASGU>
             hwCleanup = onCleanup(@() app.safeStopMeasurement()); %#ok<NASGU>
 
             p = def.Params;
@@ -497,15 +493,15 @@ classdef PPMSDeltaTamarController < handle
                 vRange  = 'Auto';
             end
 
-            fprintf(fileID, '%% Experiment: %s\n', def.Name);
-            fprintf(fileID, '%% Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
-            fprintf(fileID, '%% Delta Current (+I): %e A | (-I): %e A\n', posI, negI);
-            fprintf(fileID, '%% Delta Repeats: %d | Delay: %f s | Range: %s\n', repeats, delay, vRange);
-            fprintf(fileID, '%% Static Temperature: %f K (Rate: %f K/min, Approach: %s)\n', staticTemp, tempRate, tempApproach);
-            fprintf(fileID, '%% Static Angle: %f deg\n', staticAngle);
-            fprintf(fileID, '%% PPMS Sweep: %f Oe to %f Oe at %f Oe/sec\n', p.StartField, p.EndField, p.Rate);
-            fprintf(fileID, '%% Repetitions: %d | Back-and-forth: %d\n', def.Repeat.Repetitions, def.Repeat.BackAndForth);
-            fprintf(fileID, '%% Start from zero: %d (Repetition 0 = 0 Oe to start field)\n', fromZero);
+            rec.addMetadata('Experiment: %s', def.Name);
+            rec.addMetadata('Date: %s', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+            rec.addMetadata('Delta Current (+I): %e A | (-I): %e A', posI, negI);
+            rec.addMetadata('Delta Repeats: %d | Delay: %f s | Range: %s', repeats, delay, vRange);
+            rec.addMetadata('Static Temperature: %f K (Rate: %f K/min, Approach: %s)', staticTemp, tempRate, tempApproach);
+            rec.addMetadata('Static Angle: %f deg', staticAngle);
+            rec.addMetadata('PPMS Sweep: %f Oe to %f Oe at %f Oe/sec', p.StartField, p.EndField, p.Rate);
+            rec.addMetadata('Repetitions: %d | Back-and-forth: %d', def.Repeat.Repetitions, def.Repeat.BackAndForth);
+            rec.addMetadata('Start from zero: %d (Repetition 0 = 0 Oe to start field)', fromZero);
 
             headerParts = {'Time_s', 'Repetition'};
             for c = 1:numChannels
@@ -514,7 +510,7 @@ classdef PPMSDeltaTamarController < handle
                 headerParts{end+1} = sprintf('Field_Oe_%s', chanLabel); %#ok<AGROW>
                 headerParts{end+1} = sprintf('V_Delta_%s', chanLabel); %#ok<AGROW>
             end
-            fprintf(fileID, '%s\n', strjoin(headerParts, ','));
+            rec.setColumns(headerParts, ['%.2f,%d' repmat(',%f,%e', 1, numChannels)]);
 
             cla(app.PlotAxes);
             title(app.PlotAxes, sprintf('%s - Delta Voltage vs. Magnetic Field', def.Name));
@@ -614,7 +610,7 @@ classdef PPMSDeltaTamarController < handle
                 if p.StartField == 0
                     app.logMessage('Start field is 0 Oe; skipping the from-zero leg.');
                 else
-                    app.runFieldSweepLeg(fileID, dataLines, def, p.StartField, p.Rate, p.Interval, ...
+                    app.runFieldSweepLeg(rec, dataLines, def, p.StartField, p.Rate, p.Interval, ...
                         'Rep 0 (from zero)', 0, expStartTimer);
                     app.logMessage(sprintf('Settling at start field (%.1f Oe) for %d seconds before Rep 1/%d...', p.StartField, turnaroundSettleSec, totalReps));
                     pause(turnaroundSettleSec);
@@ -635,7 +631,7 @@ classdef PPMSDeltaTamarController < handle
 
                 segmentIndex = segmentIndex + 1;
                 legLabel = sprintf('Rep %d/%d (forward)', rep, totalReps);
-                app.runFieldSweepLeg(fileID, dataLines, def, p.EndField, p.Rate, p.Interval, legLabel, segmentIndex, expStartTimer);
+                app.runFieldSweepLeg(rec, dataLines, def, p.EndField, p.Rate, p.Interval, legLabel, segmentIndex, expStartTimer);
 
                 if backForth
                     if ~app.IsRunning; break; end
@@ -646,7 +642,7 @@ classdef PPMSDeltaTamarController < handle
 
                     segmentIndex = segmentIndex + 1;
                     legLabel = sprintf('Rep %d/%d (reverse)', rep, totalReps);
-                    app.runFieldSweepLeg(fileID, dataLines, def, p.StartField, p.Rate, p.Interval, legLabel, segmentIndex, expStartTimer);
+                    app.runFieldSweepLeg(rec, dataLines, def, p.StartField, p.Rate, p.Interval, legLabel, segmentIndex, expStartTimer);
                 end
             end
 
@@ -658,12 +654,12 @@ classdef PPMSDeltaTamarController < handle
             if backForth; backForthNote = ' back-and-forth'; end
             if fromZero; backForthNote = [backForthNote, ', from zero']; end
 
-            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.finishDataRecording(rec, def, outputFolder);
             app.logMessage(sprintf('Field sweep "%s" complete (%d repetition(s)%s).', ...
                 def.Name, totalReps, backForthNote));
         end
 
-        function runFieldSweepLeg(app, fileID, dataLines, def, targetField, rate, interval, legLabel, repIndex, expStartTimer)
+        function runFieldSweepLeg(app, rec, dataLines, def, targetField, rate, interval, legLabel, repIndex, expStartTimer)
             numChannels = length(def.ChannelSets);
 
             app.logMessage(sprintf('%s: sweeping to %.1f Oe...', legLabel, targetField));
@@ -710,16 +706,7 @@ classdef PPMSDeltaTamarController < handle
                 end
 
                 if app.IsRunning
-                    elapsedSeconds = toc(expStartTimer);
-                    rowParts = cell(1, 2 + numChannels * 2);
-                    rowParts{1} = sprintf('%.2f', elapsedSeconds);
-                    rowParts{2} = sprintf('%d', repIndex);
-
-                    for c = 1:numChannels
-                        rowParts{2 + 2*c - 1} = sprintf('%f', stepFields(c));
-                        rowParts{2 + 2*c}     = sprintf('%e', stepValues(c));
-                    end
-                    fprintf(fileID, '%s\n', strjoin(rowParts, ','));
+                    rec.addRow([toc(expStartTimer), repIndex, reshape([stepFields; stepValues], 1, [])]);
                 end
 
                 if app.PPMS.waitConditionReached(false, true, false, false)
@@ -763,13 +750,9 @@ classdef PPMSDeltaTamarController < handle
 
             app.LastClosedChannel = [];
 
-            dataFile = app.resolveExperimentDataFile(def);
-            workFile = app.workingDataFile(dataFile);
-            fileID = fopen(workFile, 'w');
-            if fileID < 0
-                error('Could not open data file: %s', workFile);
-            end
-            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
+            outputFolder = strtrim(app.OutputFolderEdit.Value);
+            rec = app.startDataRecording(def, outputFolder);
+            dataCleanup = onCleanup(@() app.finishDataRecording(rec, def, outputFolder)); %#ok<NASGU>
             hwCleanup = onCleanup(@() app.safeStopMeasurement()); %#ok<NASGU>
 
             p = def.Params;
@@ -809,14 +792,14 @@ classdef PPMSDeltaTamarController < handle
                 backForth = def.Repeat.BackAndForth;
             end
 
-            fprintf(fileID, '%% Experiment: %s\n', def.Name);
-            fprintf(fileID, '%% Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
-            fprintf(fileID, '%% Delta Current (+I): %e A | (-I): %e A\n', posI, negI);
-            fprintf(fileID, '%% Delta Repeats: %d | Delay: %f s | Range: %s\n', repeats, delay, vRange);
-            fprintf(fileID, '%% Static Field: %f Oe | Static Angle: %f deg\n', staticField, staticAngle);
-            fprintf(fileID, '%% Ramp to Start: %f K/min (%s)\n', approachRate, approachMode);
-            fprintf(fileID, '%% PPMS Sweep: %f K to %f K at %f K/min (%s)\n', p.StartTemp, p.EndTemp, p.Rate, sweepMode);
-            fprintf(fileID, '%% Repetitions: %d | Back-and-forth: %d\n', totalReps, backForth);
+            rec.addMetadata('Experiment: %s', def.Name);
+            rec.addMetadata('Date: %s', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+            rec.addMetadata('Delta Current (+I): %e A | (-I): %e A', posI, negI);
+            rec.addMetadata('Delta Repeats: %d | Delay: %f s | Range: %s', repeats, delay, vRange);
+            rec.addMetadata('Static Field: %f Oe | Static Angle: %f deg', staticField, staticAngle);
+            rec.addMetadata('Ramp to Start: %f K/min (%s)', approachRate, approachMode);
+            rec.addMetadata('PPMS Sweep: %f K to %f K at %f K/min (%s)', p.StartTemp, p.EndTemp, p.Rate, sweepMode);
+            rec.addMetadata('Repetitions: %d | Back-and-forth: %d', totalReps, backForth);
 
             headerParts = {'Time_s', 'Repetition'};
             for c = 1:numChannels
@@ -825,7 +808,7 @@ classdef PPMSDeltaTamarController < handle
                 headerParts{end+1} = sprintf('Temperature_K_%s', chanLabel); %#ok<AGROW>
                 headerParts{end+1} = sprintf('V_Delta_%s', chanLabel); %#ok<AGROW>
             end
-            fprintf(fileID, '%s\n', strjoin(headerParts, ','));
+            rec.setColumns(headerParts, ['%.2f,%d' repmat(',%f,%e', 1, numChannels)]);
 
             cla(app.PlotAxes);
             title(app.PlotAxes, sprintf('%s - Delta Voltage vs. Temperature', def.Name));
@@ -917,7 +900,7 @@ classdef PPMSDeltaTamarController < handle
 
                 segmentIndex = segmentIndex + 1;
                 legLabel = sprintf('Rep %d/%d (forward)', rep, totalReps);
-                app.runTemperatureSweepLeg(fileID, dataLines, def, p.EndTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
+                app.runTemperatureSweepLeg(rec, dataLines, def, p.EndTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
 
                 if backForth
                     if ~app.IsRunning; break; end
@@ -928,7 +911,7 @@ classdef PPMSDeltaTamarController < handle
 
                     segmentIndex = segmentIndex + 1;
                     legLabel = sprintf('Rep %d/%d (reverse)', rep, totalReps);
-                    app.runTemperatureSweepLeg(fileID, dataLines, def, p.StartTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
+                    app.runTemperatureSweepLeg(rec, dataLines, def, p.StartTemp, p.Rate, sweepMode, p.Interval, legLabel, segmentIndex, expStartTimer);
                 end
             end
 
@@ -939,12 +922,12 @@ classdef PPMSDeltaTamarController < handle
             backForthNote = '';
             if backForth; backForthNote = ' back-and-forth'; end
 
-            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.finishDataRecording(rec, def, outputFolder);
             app.logMessage(sprintf('Temperature sweep "%s" complete (%d repetition(s)%s).', ...
                 def.Name, totalReps, backForthNote));
         end
 
-        function runTemperatureSweepLeg(app, fileID, dataLines, def, targetTemp, rate, approachMode, interval, legLabel, repIndex, expStartTimer)
+        function runTemperatureSweepLeg(app, rec, dataLines, def, targetTemp, rate, approachMode, interval, legLabel, repIndex, expStartTimer)
             numChannels = length(def.ChannelSets);
 
             % A leg ends when the PPMS reports the temperature as reached and
@@ -999,16 +982,7 @@ classdef PPMSDeltaTamarController < handle
                 end
 
                 if app.IsRunning
-                    elapsedSeconds = toc(expStartTimer);
-                    rowParts = cell(1, 2 + numChannels * 2);
-                    rowParts{1} = sprintf('%.2f', elapsedSeconds);
-                    rowParts{2} = sprintf('%d', repIndex);
-
-                    for c = 1:numChannels
-                        rowParts{2 + 2*c - 1} = sprintf('%f', stepTemps(c));
-                        rowParts{2 + 2*c}     = sprintf('%e', stepValues(c));
-                    end
-                    fprintf(fileID, '%s\n', strjoin(rowParts, ','));
+                    rec.addRow([toc(expStartTimer), repIndex, reshape([stepTemps; stepValues], 1, [])]);
                 end
 
                 [currentTemp, ~] = app.PPMS.getCurrentTemperature();
@@ -1054,14 +1028,10 @@ classdef PPMSDeltaTamarController < handle
             end
         
             app.LastClosedChannel = [];
-        
-            dataFile = app.resolveExperimentDataFile(def);
-            workFile = app.workingDataFile(dataFile);
-            fileID = fopen(workFile, 'w');
-            if fileID < 0
-                error('Could not open data file: %s', workFile);
-            end
-            fileCleanup = onCleanup(@() app.finalizeDataFile(fileID, workFile, dataFile, def)); %#ok<NASGU>
+
+            outputFolder = strtrim(app.OutputFolderEdit.Value);
+            rec = app.startDataRecording(def, outputFolder);
+            dataCleanup = onCleanup(@() app.finishDataRecording(rec, def, outputFolder)); %#ok<NASGU>
             hwCleanup = onCleanup(@() app.safeStopMeasurement());
         
             p = def.Params;
@@ -1135,20 +1105,20 @@ classdef PPMSDeltaTamarController < handle
                 vRange  = 'Auto';
             end
         
-            fprintf(fileID, '%% Experiment: %s\n', def.Name);
-            fprintf(fileID, '%% Date: %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
-            fprintf(fileID, '%% Delta Current (+I): %e A | (-I): %e A\n', posI, negI);
-            fprintf(fileID, '%% Delta Repeats: %d | Delay: %f s | Range: %s\n', repeats, delay, vRange);
-            fprintf(fileID, '%% Static Temperature: %f K (Rate: %f K/min, Approach: %s) | Static Field: %f Oe\n', staticTemp, tempRate, tempApproach, staticField);
-            fprintf(fileID, '%% Rotator Sweep: %f deg to %f deg (Step: %f deg, Speed: %f deg/sec)\n', startAngle, endAngle, stepAngle, sweepRate);
-        
+            rec.addMetadata('Experiment: %s', def.Name);
+            rec.addMetadata('Date: %s', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+            rec.addMetadata('Delta Current (+I): %e A | (-I): %e A', posI, negI);
+            rec.addMetadata('Delta Repeats: %d | Delay: %f s | Range: %s', repeats, delay, vRange);
+            rec.addMetadata('Static Temperature: %f K (Rate: %f K/min, Approach: %s) | Static Field: %f Oe', staticTemp, tempRate, tempApproach, staticField);
+            rec.addMetadata('Rotator Sweep: %f deg to %f deg (Step: %f deg, Speed: %f deg/sec)', startAngle, endAngle, stepAngle, sweepRate);
+
             headerParts = {'Time_s', 'Repetition', 'Angle_deg'};
             for c = 1:numChannels
                 vec = def.ChannelSets{c};
                 chanLabel = sprintf('%d_%d_%d_%d', vec(1), vec(2), vec(3), vec(4));
                 headerParts{end+1} = sprintf('V_Delta_%s', chanLabel); %#ok<AGROW>
             end
-            fprintf(fileID, '%s\n', strjoin(headerParts, ','));
+            rec.setColumns(headerParts, ['%.2f,%d,%f' repmat(',%e', 1, numChannels)]);
         
             cla(app.PlotAxes);
             title(app.PlotAxes, sprintf('%s - Delta Voltage vs. Rotator Angle', def.Name));
@@ -1260,15 +1230,7 @@ classdef PPMSDeltaTamarController < handle
                     end
 
                     if app.IsRunning
-                        elapsedSeconds = toc(expStartTimer);
-                        rowParts = cell(1, 3 + numChannels);
-                        rowParts{1} = sprintf('%.2f', elapsedSeconds);
-                        rowParts{2} = sprintf('%d', rep);
-                        rowParts{3} = sprintf('%f', actualAngle);
-                        for c = 1:numChannels
-                            rowParts{c + 3} = sprintf('%e', stepValues(c));
-                        end
-                        fprintf(fileID, '%s\n', strjoin(rowParts, ','));
+                        rec.addRow([toc(expStartTimer), rep, actualAngle, stepValues]);
                     end
                 end
             end
@@ -1277,12 +1239,8 @@ classdef PPMSDeltaTamarController < handle
                 throw(MException('App:UserStop', 'Stopped by user.'));
             end
         
-            app.finalizeDataFile(fileID, workFile, dataFile, def);
+            app.finishDataRecording(rec, def, outputFolder);
             app.logMessage(sprintf('Angle sweep "%s" complete.', def.Name));
-        end
-
-        function safeCloseFile(~, fileID)
-            try fclose(fileID); catch; end
         end
 
         function safeStopMeasurement(app)
@@ -1290,96 +1248,123 @@ classdef PPMSDeltaTamarController < handle
             try app.Switcher.openAllChannels(); catch; end
         end
 
-        % Data is written to "<name>_INPROGRESS.csv" while an experiment runs.
-        % Only once that file is closed is it renamed to "<name>.csv" and a
-        % "<name>.mat" copy written, so the final files can never be opened
-        % (or saved over by Excel / a sync client) while still being written.
-        function workFile = workingDataFile(~, dataFile)
-            [filepath, name, ext] = fileparts(dataFile);
-            workFile = fullfile(filepath, [name '_INPROGRESS' ext]);
+        % While an experiment runs, its data is recorded on the local disk and
+        % in memory (see ExperimentDataRecorder). Only when it ends - finished,
+        % stopped or failed - are the CSV and .mat copied to the output folder,
+        % so a network drive dropping out mid-run can't lose rows. The local
+        % copies are deleted once the copies are verified, and kept if the
+        % copy fails.
+        function rec = startDataRecording(app, def, outputFolder)
+            safeName = app.safeExperimentName(def);
+            localCsv = app.resolveUniqueDataFilename(fullfile(app.localDataFolder(), ...
+                sprintf('%s_%s.csv', safeName, datestr(now, 'yyyymmdd_HHMMSS'))));
+            rec = ExperimentDataRecorder(localCsv);
+            app.logMessage(sprintf('Recording data locally to %s (copied to %s when the experiment ends).', ...
+                localCsv, fullfile(outputFolder, safeName)));
         end
 
-        function finalizeDataFile(app, fileID, workFile, dataFile, def)
-            % Called explicitly on success and again from onCleanup (stop or
-            % error). The first call closes the file; later calls do nothing.
-            if isempty(fopen(fileID))
-                return;
-            end
-            app.safeCloseFile(fileID);
-
+        function finishDataRecording(app, rec, def, outputFolder)
+            % Called explicitly at the end of a run and again from onCleanup
+            % (stop or error); only the first call does anything.
+            if rec.IsFinished; return; end
             try
-                [ok, msg] = movefile(workFile, dataFile);
-                if ~ok
-                    % e.g. the in-progress file is open in Excel: publish a copy
-                    % and leave the in-progress file behind.
-                    [ok, msg2] = copyfile(workFile, dataFile);
-                    if ok
-                        app.logMessage(sprintf('Could not rename %s (%s); saved a copy instead.', workFile, msg));
+                rec.finish(def);
+            catch ME
+                app.logMessage(sprintf('Could not write the local .mat file: %s', ME.message));
+            end
+            app.copyDataToOutputFolder(rec, def, outputFolder);
+        end
+
+        function copyDataToOutputFolder(app, rec, def, outputFolder)
+            maxAttempts = 3;
+            retryDelaySec = 30;
+            dataFile = '';
+            for attempt = 1:maxAttempts
+                try
+                    if isempty(dataFile)
+                        dataFile = app.resolveExperimentDataFile(def, outputFolder);
+                    end
+                    app.copyFileVerified(rec.CsvFile, dataFile);
+                    matNote = '';
+                    if isfile(rec.MatFile)
+                        [folder, name] = fileparts(dataFile);
+                        app.copyFileVerified(rec.MatFile, fullfile(folder, [name '.mat']));
+                        matNote = ', plus .mat';
+                    end
+                    app.logMessage(sprintf('Data saved to %s (%d rows%s).', dataFile, rec.NumRows, matNote));
+                    app.deleteLocalCopies(rec);
+                    return;
+                catch ME
+                    if attempt < maxAttempts
+                        app.logMessage(sprintf('Copying data to the output folder failed (%s); retrying in %d s...', ...
+                            ME.message, retryDelaySec));
+                        pause(retryDelaySec);
                     else
-                        app.logMessage(sprintf('Could not publish data file (%s). Data is in %s', msg2, workFile));
-                        return;
+                        app.logMessage(sprintf('Could not copy data to the output folder (%s). It is saved locally: %s', ...
+                            ME.message, rec.CsvFile));
                     end
                 end
-                app.logMessage(sprintf('Data saved to %s', dataFile));
-            catch ME
-                app.logMessage(sprintf('Could not publish data file (%s). Data is in %s', ME.message, workFile));
-                return;
-            end
-
-            [filepath, name] = fileparts(dataFile);
-            matFile = fullfile(filepath, [name '.mat']);
-            try
-                app.saveDataAsMat(dataFile, matFile, def);
-                app.logMessage(sprintf('MAT copy saved to %s', matFile));
-            catch ME
-                app.logMessage(sprintf('Could not write MAT copy (%s). The CSV is unaffected.', ME.message));
             end
         end
 
-        function saveDataAsMat(~, csvFile, matFile, def)
-            % metadata: the "%" header lines; columns: column names;
-            % data: numeric matrix (NaN where a value could not be parsed).
-            lines = splitlines(strtrim(fileread(csvFile)));
-            isMeta = startsWith(lines, '%');
-            metadata = lines(isMeta); %#ok<NASGU>
-            rest = lines(~isMeta);
-            rest = rest(~cellfun(@isempty, rest));
-
-            columns = {};
-            data = zeros(0, 0);
-            if ~isempty(rest)
-                columns = strsplit(rest{1}, ',');
-                data = NaN(numel(rest) - 1, numel(columns));
-                for i = 2:numel(rest)
-                    vals = str2double(strsplit(rest{i}, ','));
-                    n = min(numel(vals), numel(columns));
-                    data(i - 1, 1:n) = vals(1:n);
+        function deleteLocalCopies(app, rec)
+            % Only called once the files are verified in the output folder.
+            localFiles = {rec.CsvFile, rec.MatFile};
+            for k = 1:numel(localFiles)
+                if ~isfile(localFiles{k}); continue; end
+                delete(localFiles{k});
+                if isfile(localFiles{k})
+                    app.logMessage(sprintf('Could not delete the local copy %s; it is kept.', localFiles{k}));
                 end
             end
-            experiment = def; %#ok<NASGU>
-            save(matFile, 'data', 'columns', 'metadata', 'experiment');
         end
 
-        function safeFile = resolveUniqueDataFilename(app, baseFile)
-            [filepath, name, ext] = fileparts(baseFile);
-            safeFile = baseFile;
-            counter = 1;
-            while isfile(safeFile) || isfile(app.workingDataFile(safeFile))
-                safeFile = fullfile(filepath, sprintf('%s_%d%s', name, counter, ext));
-                counter = counter + 1;
+        function copyFileVerified(~, source, destination)
+            [ok, msg] = copyfile(source, destination, 'f');
+            if ~ok
+                if isempty(msg); msg = 'copy failed'; end
+                error('%s', msg);
+            end
+            src = dir(source);
+            dst = dir(destination);
+            if isempty(dst) || dst.bytes ~= src.bytes
+                error('copy of %s is incomplete', destination);
             end
         end
 
-        function dataFile = resolveExperimentDataFile(app, def)
-            baseFolder = strtrim(app.OutputFolderEdit.Value);
+        function folder = localDataFolder(~)
+            base = getenv('LOCALAPPDATA');
+            if isempty(base); base = tempdir; end
+            folder = fullfile(base, 'PPMSTamarController', 'LocalData');
+            if ~isfolder(folder); mkdir(folder); end
+        end
+
+        function safeName = safeExperimentName(~, def)
             safeName = regexprep(def.Name, '[^\w\- ]', '');
             if isempty(safeName); safeName = 'Experiment'; end
+        end
 
-            expFolder = fullfile(baseFolder, safeName);
-            if ~isfolder(expFolder)
-                mkdir(expFolder);
+        function safeFile = resolveUniqueDataFilename(~, baseFile)
+            % Adds _1, _2, ... until neither the .csv nor its .mat exists yet.
+            [filepath, name, ext] = fileparts(baseFile);
+            candidate = name;
+            counter = 1;
+            while isfile(fullfile(filepath, [candidate ext])) || isfile(fullfile(filepath, [candidate '.mat']))
+                candidate = sprintf('%s_%d', name, counter);
+                counter = counter + 1;
             end
+            safeFile = fullfile(filepath, [candidate ext]);
+        end
 
+        function dataFile = resolveExperimentDataFile(app, def, outputFolder)
+            safeName = app.safeExperimentName(def);
+            expFolder = fullfile(outputFolder, safeName);
+            if ~isfolder(expFolder)
+                [ok, msg] = mkdir(expFolder);
+                if ~ok
+                    error('could not create %s (%s)', expFolder, strtrim(msg));
+                end
+            end
             dataFile = app.resolveUniqueDataFilename(fullfile(expFolder, [safeName '.csv']));
         end
 
@@ -1424,6 +1409,10 @@ classdef PPMSDeltaTamarController < handle
         function logMessage(app, msg)
             timestamp = datestr(now, 'HH:MM:SS');
             line = sprintf('[%s] %s', timestamp, msg);
+            if isempty(app.LogTextArea) || ~isvalid(app.LogTextArea)
+                fprintf('%s\n', line);   % window already closed (e.g. data copy at the end of a run)
+                return;
+            end
             app.LogTextArea.Value = [app.LogTextArea.Value; {line}];
             scroll(app.LogTextArea, 'bottom');
         end
